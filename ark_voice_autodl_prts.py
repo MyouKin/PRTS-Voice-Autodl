@@ -1,129 +1,132 @@
-from curl_cffi import requests
-from bs4 import BeautifulSoup
+import re
 import time
+from pathlib import Path
+from typing import Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
-def isnotcolon(n,str):
-    #print(n)
-    #print(str[n])
-    if str[n]=="\"":
-        #print("是冒号")
-        return 0
-    else:
-        #print("不是冒号")
-        return 1
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+VOICE_CODES = {
+    1: "voice",
+    2: "voice_cn",
+    3: "voice_kr",
+    4: "voice_en",
+    5: "voice_custom",
+}
 
-def checkstatus(str):
-    test = requests.get(str)
-    
-    if test.status_code==404:
-        print("无效文件")
-        print (test.status_code)
-        #return 0
-    elif test.status_code==200:
-        print("有效文件：存储为")
-        print (test.status_code)
-        #return 1
-    else:
-        print("错误")
-        #return 0
 
-def checkfile(str):
-    test = requests.get(str)
-    
-    if test.status_code==404:
-        #print("无效文件")
-        #print (test.status_code)
-        return 0
-    elif test.status_code==200:
-        #print("有效文件")
-        #print (test.status_code)
-        return 1
-    else:
-        #print("错误")
-        return 0
+def http_get_bytes(url: str, timeout: int = 20) -> bytes:
+    req = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read()
 
-def findkeyreg(txt):
-    find=txt.find("data-voice-key")
-    key=find+16
-    num=0
-    #print(key)
-    #print(response.text[key])
-    #print(len(response.text))
-    if response.text[key-1]=="\"":
-        print("成功定位")
-        while isnotcolon(key+num,response.text):
-            num=num+1
-    print("名字长度是"+str(num))
-    sign=response.text[key:num+key]
-    print("角色代码为"+sign)
-    return sign
 
-def findkeycus():
-    find=response.text.find("data-voice-key")
-    key=find+16
-    num=0
-    #print(key)
-    #print(response.text[key])
-    #print(len(response.text))
-    if response.text[key-1]=="\"":
-        print("成功定位")
-        while isnotcolon(key+num,response.text):
-            num=num+1
-    print("名字长度是"+str(num))
-    sign=response.text[key:num+key]
-    print("角色代码为"+sign)
-    return sign
+def fetch_text(url: str, timeout: int = 20) -> str:
+    return http_get_bytes(url, timeout=timeout).decode("utf-8", errors="ignore")
 
-character=input("请输入干员中文名称，例如麦哲伦\n")
-url = "https://prts.wiki/w/"+character+"/语音记录"
-lan=int(input("输入语言选项：\n(1)日语voice\n(2)汉语voice_cn\n(3)韩语voice_kr\n(4)英语voice_en\n(5)特殊语言voice_custom\n"))
-chname=input("输入生成文件的角色名称（不能有汉字）\n")
 
-if 1<=lan<=5:
-    print("收到")
-else:
-    print("错误")
+def get_voice_key(page_html: str) -> Optional[str]:
+    # PRTS 页面上常见格式: data-voice-key="char_123_xxx"
+    match = re.search(r'data-voice-key\s*=\s*"([^"]+)"', page_html)
+    return match.group(1) if match else None
 
-response = requests.get(url)
-soup = BeautifulSoup(response.text, 'html.parser')
 
-code=findkeyreg(response.text)
+def build_wiki_url(character_name: str) -> str:
+    return f"https://prts.wiki/w/{quote(character_name)}/{quote('语音记录')}"
 
-voicecode=""
-if lan==1:
-    voicecode="voice"
-elif lan==2:
-    voicecode="voice_cn"
-elif lan==3:
-    voicecode="voice_kr"
-elif lan==4:
-    voicecode="voice_en"
-elif lan==5:
-    voicecode="voice_custom"
 
-filenum=1
-#filenumset=[1000]
-length = 100
-# 生成固定长度的列表
-filenumset = ["000" for _ in range(length)]
+def download_voice_files(
+    voice_code: str,
+    voice_key: str,
+    output_prefix: str,
+    max_index: int = 200,
+    max_consecutive_misses: int = 12,
+) -> int:
+    saved = 0
+    misses = 0
+    output_dir = Path.cwd()
 
-while filenum<=100:
-    if 1<=filenum<=9:
-        filenumset[filenum]="00"+str(filenum)
-    elif 10<=filenum<=99:
-        filenumset[filenum]="0"+str(filenum)
-    filenum=filenum+1
+    for i in range(1, max_index + 1):
+        seq = f"{i:03d}"
+        file_url = f"https://static.prts.wiki/{voice_code}/{voice_key}/CN_{seq}.wav"
+        filename = output_dir / f"{output_prefix}-{seq}.wav"
 
-for i in range(1,100):
-    filename="https://static.prts.wiki/"+voicecode+"/"+code+"/CN_"+filenumset[i]+".wav"
-    print(filename)
-    temp = requests.get(filename)
-    #print (temp.status_code)
-    checkstatus(filename)
-    if checkfile(filename):
-        output=chname+"-"+filenumset[i]+".wav"
-        print(output)
-        with open(output,'wb') as f:
-            f.write(temp.content)
-        time.sleep(1)
-    #print(filename)
+        try:
+            data = http_get_bytes(file_url)
+            filename.write_bytes(data)
+            print(f"[OK] {filename.name}")
+            saved += 1
+            misses = 0
+            time.sleep(0.2)
+        except HTTPError as e:
+            if e.code == 404:
+                misses += 1
+                print(f"[404] {file_url}")
+                if misses >= max_consecutive_misses and saved > 0:
+                    print("连续缺失较多，提前结束下载。")
+                    break
+            else:
+                print(f"[HTTP {e.code}] {file_url}")
+                misses += 1
+        except URLError as e:
+            print(f"[网络错误] {file_url} -> {e}")
+            misses += 1
+
+    return saved
+
+
+def main() -> None:
+    character = input("请输入干员中文名称，例如麦哲伦\n").strip()
+    wiki_url = build_wiki_url(character)
+
+    try:
+        lan = int(
+            input(
+                "输入语言选项：\n"
+                "(1)日语 voice\n"
+                "(2)汉语 voice_cn\n"
+                "(3)韩语 voice_kr\n"
+                "(4)英语 voice_en\n"
+                "(5)特殊语言 voice_custom\n"
+            )
+        )
+    except ValueError:
+        print("语言选项必须是数字。")
+        return
+
+    if lan not in VOICE_CODES:
+        print("错误：语言选项超出范围。")
+        return
+
+    output_name = input("输入生成文件的角色名称（建议英文/拼音）\n").strip()
+    if not output_name:
+        print("输出名称不能为空。")
+        return
+
+    print(f"正在读取页面：{wiki_url}")
+    try:
+        page_html = fetch_text(wiki_url)
+    except Exception as e:  # noqa: BLE001
+        print(f"读取页面失败：{e}")
+        return
+
+    voice_key = get_voice_key(page_html)
+    if not voice_key:
+        print("未找到 data-voice-key，页面结构可能已变化。")
+        return
+
+    print(f"识别到角色代码：{voice_key}")
+    downloaded = download_voice_files(
+        voice_code=VOICE_CODES[lan],
+        voice_key=voice_key,
+        output_prefix=output_name,
+    )
+    print(f"下载完成，共保存 {downloaded} 个文件。")
+
+
+if __name__ == "__main__":
+    main()
